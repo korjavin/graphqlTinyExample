@@ -422,3 +422,32 @@ func (r *Repository) GetDeliveriesByPurchaseID(purchaseID int) ([]*models.Delive
 	log.Printf("[DB] Found %d deliveries for purchase ID %d", len(deliveries), purchaseID)
 	return deliveries, nil
 }
+
+// CreateDelivery inserts a new delivery status update
+func (r *Repository) CreateDelivery(purchaseID int, status string) (*models.Delivery, error) {
+	log.Printf("[DB] Creating new delivery for purchase ID: %d with status: %s", purchaseID, status)
+
+	var id int
+	var timestamp time.Time
+
+	err := r.db.QueryRow(
+		`INSERT INTO deliveries (purchase_id, timestamp, status) 
+		VALUES ($1, NOW(), $2) RETURNING id, timestamp`,
+		purchaseID, status).Scan(&id, &timestamp)
+
+	if err != nil {
+		log.Printf("[DB] Error creating delivery: %v", err)
+		return nil, err
+	}
+
+	// Return the newly created delivery
+	delivery := &models.Delivery{
+		ID:         id,
+		PurchaseID: purchaseID,
+		Timestamp:  timestamp,
+		Status:     status,
+	}
+
+	log.Printf("[DB] Created new delivery with ID: %d", id)
+	return delivery, nil
+}

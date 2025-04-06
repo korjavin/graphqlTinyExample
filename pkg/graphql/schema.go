@@ -5,6 +5,7 @@ const Schema = `
 schema {
   query: Query
   mutation: Mutation
+  subscription: Subscription
 }
 
 type Query {
@@ -31,6 +32,14 @@ type Mutation {
   
   # Create a new purchase
   createPurchase(input: CreatePurchaseInput!): Purchase!
+  
+  # Create a new delivery status update
+  createDelivery(input: CreateDeliveryInput!): Delivery!
+}
+
+type Subscription {
+  # Subscribe to delivery updates
+  deliveryUpdated(purchaseId: ID): Delivery!
 }
 
 type Seller {
@@ -109,5 +118,11 @@ input CreatePurchaseInput {
   price: Float!
   bankTxId: String!
   deliveryAddress: String!
+}
+
+# Input for creating a new delivery update
+input CreateDeliveryInput {
+  purchaseId: ID!
+  status: DeliveryStatus!
 }
 `

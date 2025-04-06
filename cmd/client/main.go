@@ -9,9 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 // GraphQL request structure
@@ -19,6 +23,13 @@ type graphQLRequest struct {
 	Query         string                 `json:"query"`
 	Variables     map[string]interface{} `json:"variables,omitempty"`
 	OperationName string                 `json:"operationName,omitempty"`
+}
+
+// WebSocket message
+type wsMessage struct {
+	Type    string      `json:"type"`
+	ID      string      `json:"id,omitempty"`
+	Payload interface{} `json:"payload,omitempty"`
 }
 
 // Command line flags
@@ -36,6 +47,7 @@ var (
 	bankTxId        string
 	deliveryAddress string
 	statusFilter    string
+	status          string
 	fromDate        string
 	toDate          string
 	verbose         bool
@@ -53,7 +65,7 @@ func main() {
 	}
 
 	flag.StringVar(&serverURL, "server", serverURLEnv, "GraphQL server URL")
-	flag.StringVar(&queryType, "query", "", "Query/mutation type (sellers, seller, listings, listing, purchases, purchase, deliveries, delivery, create-listing, create-purchase)")
+	flag.StringVar(&queryType, "query", "", "Query/mutation type (sellers, seller, listings, listing, purchases, purchase, deliveries, delivery, create-listing, create-purchase, create-delivery, subscribe)")
 	flag.IntVar(&id, "id", 0, "ID for specific item queries")
 	flag.IntVar(&sellerId, "seller-id", 0, "Filter listings by seller ID or use as seller ID for creating listings")
 	flag.IntVar(&listingId, "listing-id", 0, "Filter purchases by listing ID or use as listing ID for creating purchases")
@@ -65,6 +77,7 @@ func main() {
 	flag.StringVar(&bankTxId, "bank-tx-id", "", "Bank transaction ID for creating purchases")
 	flag.StringVar(&deliveryAddress, "delivery-address", "", "Delivery address for creating purchases")
 	flag.StringVar(&statusFilter, "status", "", "Filter deliveries by status (PACKED, OUT_FOR_DELIVERY, DELIVERED, RESCHEDULED, CANCELED)")
+	flag.StringVar(&status, "delivery-status", "", "Status for creating deliveries")
 	flag.StringVar(&fromDate, "from", "", "Filter by start date (format: 2025-04-01T00:00:00Z)")
 	flag.StringVar(&toDate, "to", "", "Filter by end date (format: 2025-04-01T00:00:00Z)")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
@@ -75,7 +88,7 @@ func main() {
 
 	// Check if query type is provided
 	if queryType == "" {
-		log.Println("No query type specified. Use -query flag with one of: sellers, seller, listings, listing, purchases, purchase, deliveries, delivery, create-listing, create-purchase")
+		log.Println("No query type specified. Use -query flag with one of: sellers, seller, listings, listing, purchases, purchase, deliveries, delivery, create-listing, create-purchase, create-delivery, subscribe")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -325,6 +338,63 @@ func main() {
 			},
 		}
 
+	case "create-delivery":
+		if id == 0 || status == "" {
+			log.Fatalf("To create a delivery, you must provide: -id (purchase ID), -delivery-status")
+		}
+
+		query = `
+		mutation($input: CreateDeliveryInput!) {
+			createDelivery(input: $input) {
+				id
+				timestamp
+				status
+				purchase {
+					id
+					bankTxId
+					listing {
+						id
+						title
+					}
+				}
+			}
+		}
+		`
+		variables = map[string]interface{}{
+			"input": map[string]interface{}{
+				"purchaseId": strconv.Itoa(id),
+				"status":     strings.ToUpper(status),
+			},
+		}
+
+	case "subscribe":
+		if id == 0 {
+			log.Fatalf("Purchase ID is required for delivery subscription. Use -id flag.")
+		}
+
+		query = `
+		subscription($purchaseId: ID!) {
+			deliveryUpdated(purchaseId: $purchaseId) {
+				id
+				timestamp
+				status
+				purchase {
+					id
+					bankTxId
+				}
+			}
+		}
+		`
+		variables = map[string]interface{}{
+			"purchaseId": strconv.Itoa(id),
+		}
+
+		err := executeSubscription(query, variables)
+		if err != nil {
+			log.Fatalf("Failed to execute subscription: %v", err)
+		}
+		return
+
 	default:
 		log.Fatalf("Unknown query type: %s", queryType)
 	}
@@ -501,4 +571,122 @@ func executeQuery(query string, variables map[string]interface{}) (map[string]in
 	}
 
 	return result, nil
+}
+
+// executeSubscription handles GraphQL subscriptions over WebSocket
+func executeSubscription(query string, variables map[string]interface{}) error {
+	// Convert HTTP URL to WebSocket URL
+	wsURL := strings.Replace(serverURL, "http://", "ws://", 1)
+	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+	wsURL = strings.Replace(wsURL, "/graphql", "/graphql/ws", 1)
+
+	log.Printf("Connecting to WebSocket endpoint: %s", wsURL)
+
+	// Connect to WebSocket
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WebSocket: %w", err)
+	}
+	defer conn.Close()
+
+	subscriptionID := uuid.New().String()
+
+	// Send connection init message
+	initMessage := wsMessage{Type: "connection_init"}
+	if err := conn.WriteJSON(initMessage); err != nil {
+		return fmt.Errorf("failed to send connection init: %w", err)
+	}
+
+	// Wait for connection ack
+	var ackMessage wsMessage
+	if err := conn.ReadJSON(&ackMessage); err != nil {
+		return fmt.Errorf("failed to receive connection ack: %w", err)
+	}
+
+	if ackMessage.Type != "connection_ack" {
+		return fmt.Errorf("expected connection_ack, got %s", ackMessage.Type)
+	}
+
+	log.Printf("Connection established, sending subscription request")
+
+	// Send start subscription message
+	startMessage := wsMessage{
+		Type: "start",
+		ID:   subscriptionID,
+		Payload: graphQLRequest{
+			Query:     query,
+			Variables: variables,
+		},
+	}
+	if err := conn.WriteJSON(startMessage); err != nil {
+		return fmt.Errorf("failed to start subscription: %w", err)
+	}
+
+	log.Printf("Subscription started with ID: %s", subscriptionID)
+	log.Printf("Listening for delivery updates (Press Ctrl+C to stop)...")
+
+	// Handle incoming messages
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var message wsMessage
+			if err := conn.ReadJSON(&message); err != nil {
+				log.Printf("Error reading WebSocket message: %v", err)
+				return
+			}
+
+			switch message.Type {
+			case "data":
+				// Parse and display the subscription data
+				if payload, ok := message.Payload.(map[string]interface{}); ok {
+					if data, ok := payload["data"].(map[string]interface{}); ok {
+						if update, ok := data["deliveryUpdated"].(map[string]interface{}); ok {
+							fmt.Println("\n📦 Delivery Update Received:")
+							fmt.Println("========================")
+							prettyJSON, _ := json.MarshalIndent(update, "", "  ")
+							fmt.Println(string(prettyJSON))
+							fmt.Println("========================")
+						}
+					}
+				} else {
+					// Fallback for when type assertion fails
+					prettyJSON, _ := json.MarshalIndent(message.Payload, "", "  ")
+					fmt.Printf("\nReceived subscription data: %s\n", string(prettyJSON))
+				}
+			case "error":
+				log.Printf("Subscription error: %v", message.Payload)
+			case "complete":
+				log.Printf("Subscription completed")
+				return
+			default:
+				log.Printf("Received message of type: %s", message.Type)
+			}
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully close the connection
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
+
+	log.Printf("Interrupted, closing subscription...")
+
+	// Send stop subscription message
+	stopMessage := wsMessage{Type: "stop", ID: subscriptionID}
+	if err := conn.WriteJSON(stopMessage); err != nil {
+		return fmt.Errorf("failed to stop subscription: %w", err)
+	}
+
+	// Wait for subscription to complete clean up
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+
+	// Close connection
+	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
+		websocket.CloseNormalClosure, ""))
+
+	return nil
 }

@@ -8,18 +8,23 @@ import (
 	"time"
 
 	"github.com/graph-gophers/graphql-go"
+	"github.com/korjavin/graphqlTinyExample/pkg/events"
 	"github.com/korjavin/graphqlTinyExample/pkg/models"
 	"github.com/korjavin/graphqlTinyExample/pkg/repository"
 )
 
 // Resolver is the root resolver for all GraphQL queries
 type Resolver struct {
-	repo *repository.Repository
+	repo     *repository.Repository
+	eventBus *events.EventBus
 }
 
 // NewResolver creates a new resolver with the given repository
 func NewResolver(repo *repository.Repository) *Resolver {
-	return &Resolver{repo: repo}
+	return &Resolver{
+		repo:     repo,
+		eventBus: events.NewEventBus(),
+	}
 }
 
 // Schema loads the GraphQL schema from the schema.graphql file
@@ -361,6 +366,11 @@ type CreatePurchaseInput struct {
 	DeliveryAddress string
 }
 
+type CreateDeliveryInput struct {
+	PurchaseID graphql.ID
+	Status     string
+}
+
 // Mutation resolvers
 func (r *Resolver) CreateListing(ctx context.Context, args struct{ Input CreateListingInput }) (*ListingResolver, error) {
 	log.Printf("[GraphQL] CreateListing mutation with input: %+v", args.Input)
@@ -426,6 +436,94 @@ func (r *Resolver) CreatePurchase(ctx context.Context, args struct{ Input Create
 
 	log.Printf("[GraphQL] Successfully created purchase ID: %d", purchase.ID)
 	return &PurchaseResolver{purchase: purchase, repo: r.repo}, nil
+}
+
+// CreateDelivery mutation resolver
+func (r *Resolver) CreateDelivery(ctx context.Context, args struct{ Input CreateDeliveryInput }) (*DeliveryResolver, error) {
+	log.Printf("[GraphQL] CreateDelivery mutation with input: %+v", args.Input)
+
+	// Parse purchase ID
+	purchaseID, err := strconv.Atoi(string(args.Input.PurchaseID))
+	if err != nil {
+		log.Printf("[GraphQL] Invalid purchase ID format: %v", err)
+		return nil, fmt.Errorf("invalid purchase ID format: %v", err)
+	}
+
+	// Validate purchase exists
+	_, err = r.repo.GetPurchase(purchaseID)
+	if err != nil {
+		log.Printf("[GraphQL] Purchase not found: %v", err)
+		return nil, fmt.Errorf("purchase not found: %v", err)
+	}
+
+	// Convert GraphQL enum to database enum
+	var status string
+	switch args.Input.Status {
+	case "PACKED":
+		status = "packed"
+	case "OUT_FOR_DELIVERY":
+		status = "out_for_delivery"
+	case "DELIVERED":
+		status = "delivered"
+	case "RESCHEDULED":
+		status = "rescheduled"
+	case "CANCELED":
+		status = "canceled"
+	default:
+		log.Printf("[GraphQL] Invalid status: %s", args.Input.Status)
+		return nil, fmt.Errorf("invalid status: %s", args.Input.Status)
+	}
+
+	// Create delivery
+	delivery, err := r.repo.CreateDelivery(purchaseID, status)
+	if err != nil {
+		log.Printf("[GraphQL] Error creating delivery: %v", err)
+		return nil, err
+	}
+
+	log.Printf("[GraphQL] Successfully created delivery ID: %d", delivery.ID)
+
+	// Publish the event
+	r.eventBus.PublishDelivery(delivery)
+
+	return &DeliveryResolver{delivery: delivery, repo: r.repo}, nil
+}
+
+// DeliveryUpdated subscription resolver
+func (r *Resolver) DeliveryUpdated(ctx context.Context, args struct{ PurchaseID *graphql.ID }) (<-chan *DeliveryResolver, error) {
+	var purchaseIDStr string
+	if args.PurchaseID != nil {
+		purchaseIDStr = string(*args.PurchaseID)
+		log.Printf("[GraphQL] DeliveryUpdated subscription for purchase ID: %s", purchaseIDStr)
+	} else {
+		log.Printf("[GraphQL] DeliveryUpdated subscription for all deliveries")
+	}
+
+	// Create event channel
+	events := r.eventBus.SubscribeToDeliveries(purchaseIDStr)
+	c := make(chan *DeliveryResolver, 1)
+
+	// Handle clean up when subscription is closed
+	go func() {
+		<-ctx.Done()
+		log.Printf("[GraphQL] Subscription context done, cleaning up")
+		r.eventBus.Unsubscribe(purchaseIDStr, events)
+		close(c)
+	}()
+
+	// Forward events to client
+	go func() {
+		for event := range events {
+			select {
+			case <-ctx.Done():
+				return
+			case c <- &DeliveryResolver{delivery: event.Delivery, repo: r.repo}:
+				log.Printf("[GraphQL] Sent delivery event to subscriber")
+			}
+		}
+	}()
+
+	return c, nil
 }
 
 // Root Query resolvers
