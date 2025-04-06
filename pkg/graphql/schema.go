@@ -4,6 +4,7 @@ package graphql
 const Schema = `
 schema {
   query: Query
+  mutation: Mutation
 }
 
 type Query {
@@ -22,6 +23,14 @@ type Query {
   # Delivery queries
   delivery(id: ID!): Delivery
   deliveries(filter: DeliveryFilter): [Delivery!]!
+}
+
+type Mutation {
+  # Create a new listing
+  createListing(input: CreateListingInput!): Listing!
+  
+  # Create a new purchase
+  createPurchase(input: CreatePurchaseInput!): Purchase!
 }
 
 type Seller {
@@ -84,5 +93,21 @@ input DeliveryFilter {
   status: DeliveryStatus
   fromDate: String
   toDate: String
+}
+
+# Input for creating a new listing
+input CreateListingInput {
+  sellerId: ID!
+  title: String!
+  description: String!
+  price: Float!
+}
+
+# Input for creating a new purchase
+input CreatePurchaseInput {
+  listingId: ID!
+  price: Float!
+  bankTxId: String!
+  deliveryAddress: String!
 }
 `
