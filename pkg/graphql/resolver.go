@@ -30,7 +30,10 @@ func NewResolver(repo *repository.Repository) *Resolver {
 // Schema loads the GraphQL schema from the schema.graphql file
 func GetSchema(resolver *Resolver) (*graphql.Schema, error) {
 	schemaString := Schema
-	schema, err := graphql.ParseSchema(schemaString, resolver)
+	schema, err := graphql.ParseSchema(schemaString, resolver,
+		graphql.UseStringDescriptions(),
+		graphql.SubscribeResolverTimeout(60*time.Second),
+	)
 	if err != nil {
 		return nil, err
 	}

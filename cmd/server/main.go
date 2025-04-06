@@ -1,15 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
+	graphqlgo "github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
 	_ "github.com/lib/pq"
 
@@ -70,7 +70,7 @@ func main() {
 		log.Printf("[WS] New WebSocket connection from %s", r.RemoteAddr)
 
 		// Handle subscription protocol
-		handleWebSocketConnection(conn, resolver)
+		handleGraphQLSubscription(conn, schema)
 	})
 
 	// Serve GraphQL Playground for interactive API exploration
@@ -94,14 +94,14 @@ func main() {
 	}
 }
 
-// handleWebSocketConnection manages the WebSocket connection for GraphQL subscriptions
-func handleWebSocketConnection(conn *websocket.Conn, resolver *graphql.Resolver) {
+// handleGraphQLSubscription manages the WebSocket connection for GraphQL subscriptions
+func handleGraphQLSubscription(conn *websocket.Conn, schema *graphqlgo.Schema) {
 	// Map of active subscriptions, keyed by subscription ID
-	subscriptions := make(map[string]chan struct{})
+	subscriptions := make(map[string]context.CancelFunc)
 	defer func() {
 		// Clean up all subscriptions when connection closes
-		for id, quit := range subscriptions {
-			close(quit)
+		for id, cancel := range subscriptions {
+			cancel()
 			log.Printf("[WS] Closing subscription %s", id)
 		}
 	}()
@@ -151,57 +151,43 @@ func handleWebSocketConnection(conn *websocket.Conn, resolver *graphql.Resolver)
 
 			log.Printf("[WS] Starting subscription %s: %s", message.ID, payload.Query)
 
-			// Create quit channel for this subscription
-			quit := make(chan struct{})
-			subscriptions[message.ID] = quit
+			// Create context with cancel function for this subscription
+			ctx, cancel := context.WithCancel(context.Background())
+			subscriptions[message.ID] = cancel
 
-			// Start subscription goroutine
-			go func(id string, query string, variables map[string]interface{}, quit <-chan struct{}) {
-				// This is a simplified version - in a real implementation,
-				// you would use resolver's subscription resolvers to stream events
+			// Start the subscription
+			go func(id string, ctx context.Context) {
+				// Execute the subscription query
+				responseChannel, err := schema.Subscribe(ctx, payload.Query, payload.OperationName, payload.Variables)
 
-				// For demonstration, we'll simulate delivery updates every few seconds
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
+				if err != nil {
+					log.Printf("[WS] Subscription error: %v", err)
+					sendErrorMessage(conn, id, err.Error())
+					return
+				}
 
-				statuses := []string{"PACKED", "OUT_FOR_DELIVERY", "DELIVERED"}
-				statusIndex := 0
-
-				for {
-					select {
-					case <-ticker.C:
-						// Generate a sample delivery update
-						data := map[string]interface{}{
-							"data": map[string]interface{}{
-								"deliveryUpdated": map[string]interface{}{
-									"id":        fmt.Sprintf("%d", rand.Intn(1000)),
-									"timestamp": time.Now().Format(time.RFC3339),
-									"status":    statuses[statusIndex],
-									"purchase": map[string]interface{}{
-										"id":       variables["purchaseId"],
-										"bankTxId": "TX" + fmt.Sprintf("%d", rand.Intn(10000)),
-									},
-								},
-							},
+				// Process subscription events from the channel
+				for response := range responseChannel {
+					// Type assert to get the actual response type
+					if graphqlResponse, ok := response.(*graphqlgo.Response); ok {
+						if graphqlResponse.Errors != nil && len(graphqlResponse.Errors) > 0 {
+							// If there's an error, send it to the client
+							sendErrorMessage(conn, id, graphqlResponse.Errors[0].Error())
+							continue
 						}
 
-						// Send the update to the client
-						sendMessage(conn, "data", id, data)
-
-						// Cycle through statuses
-						statusIndex = (statusIndex + 1) % len(statuses)
-
-					case <-quit:
-						log.Printf("[WS] Subscription %s terminated", id)
-						return
+						// Send data to the client
+						sendMessage(conn, "data", id, map[string]interface{}{
+							"data": graphqlResponse.Data,
+						})
 					}
 				}
-			}(message.ID, payload.Query, payload.Variables, quit)
+			}(message.ID, ctx)
 
 		case "stop":
 			// Stop subscription
-			if quit, ok := subscriptions[message.ID]; ok {
-				close(quit)
+			if cancel, ok := subscriptions[message.ID]; ok {
+				cancel()
 				delete(subscriptions, message.ID)
 				log.Printf("[WS] Stopped subscription %s", message.ID)
 			}
@@ -286,7 +272,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Update the Playground handler to support subscriptions
+// playgroundHandler serves the GraphQL Playground UI
 func playgroundHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

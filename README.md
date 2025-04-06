@@ -10,6 +10,7 @@ This project is a simple example of how to implement a GraphQL API in Go, using 
 2. A GraphQL server that serves data from the database, with filtering capabilities
 3. A CLI client that can query the GraphQL server
 4. Docker configurations for all components
+5. Support for GraphQL mutations and real-time subscriptions
 
 ## Project Structure
 
@@ -25,6 +26,7 @@ graphqlTinyExample/
 │   ├── 01_schema.sql      # Schema definition
 │   └── 02_fixtures.sql    # Test data
 ├── pkg/
+│   ├── events/            # Event system for subscriptions
 │   ├── graphql/           # GraphQL schema and resolvers
 │   ├── models/            # Data models
 │   └── repository/        # Database operations
@@ -37,15 +39,16 @@ graphqlTinyExample/
 ## Features
 
 - **GraphQL API** with filtering capabilities
-- **Read-only data access** from the database
+- **Full CRUD operations** via queries and mutations
+- **Real-time updates** with GraphQL subscriptions
 - **Dockerized components** for easy deployment
-- **CLI client** for querying the GraphQL API
+- **CLI client** for interacting with the GraphQL API
 - **GitHub Actions** for CI/CD pipeline
 
 ## GraphQL Schema
 
 ```graphql
-# Main query types
+# Main types
 type Query {
   seller(id: ID!): Seller
   sellers: [Seller!]!
@@ -57,16 +60,29 @@ type Query {
   deliveries(filter: DeliveryFilter): [Delivery!]!
 }
 
+type Mutation {
+  createListing(input: CreateListingInput!): Listing!
+  createPurchase(input: CreatePurchaseInput!): Purchase!
+  createDelivery(input: CreateDeliveryInput!): Delivery!
+}
+
+type Subscription {
+  deliveryUpdated(purchaseId: ID): Delivery!
+}
+
 # Entity types with their relationships
 type Seller { ... }
 type Listing { ... }
 type Purchase { ... }
 type Delivery { ... }
 
-# Filter input types for querying data
+# Filter and input types
 input ListingFilter { ... }
 input PurchaseFilter { ... }
 input DeliveryFilter { ... }
+input CreateListingInput { ... }
+input CreatePurchaseInput { ... }
+input CreateDeliveryInput { ... }
 ```
 
 ## Setup & Usage
@@ -186,6 +202,83 @@ query {
 }
 ```
 
+### Example Mutations
+
+#### Create a New Listing
+```graphql
+mutation {
+  createListing(input: {
+    sellerId: "1",
+    title: "New Gaming Laptop",
+    description: "High performance gaming laptop with RTX 3080",
+    price: 1299.99
+  }) {
+    id
+    title
+    price
+  }
+}
+```
+
+#### Create a Purchase
+```graphql
+mutation {
+  createPurchase(input: {
+    listingId: "5",
+    price: 1299.99,
+    bankTxId: "TX123456789",
+    deliveryAddress: "123 Main St, Anytown, US 12345"
+  }) {
+    id
+    price
+    deliveryAddress
+    createdAt
+  }
+}
+```
+
+#### Create a Delivery
+```graphql
+mutation {
+  createDelivery(input: {
+    purchaseId: "3",
+    status: "PACKED"
+  }) {
+    id
+    status
+    timestamp
+  }
+}
+```
+
+### Example Subscriptions
+
+#### Subscribe to Delivery Updates
+```graphql
+subscription {
+  deliveryUpdated(purchaseId: "3") {
+    id
+    status
+    timestamp
+    purchase {
+      id
+      deliveryAddress
+    }
+  }
+}
+```
+
+This subscription will provide real-time updates whenever a delivery status changes for the specified purchase ID. If no purchase ID is provided, it will subscribe to all delivery updates across the system.
+
+## Real-time Capabilities
+
+The application now supports real-time updates through GraphQL subscriptions:
+
+1. **WebSocket Connection**: Clients can establish a WebSocket connection to subscribe to events
+2. **Filtered Subscriptions**: Subscribe to specific purchase delivery updates or all updates
+3. **Event-driven Architecture**: The system uses an event bus to manage and distribute events
+4. **Low-latency Updates**: Receive instant notifications when delivery status changes
+
 ## Testing
 
 Run the tests with:
@@ -210,5 +303,5 @@ GraphQL is a powerful query language for your API, providing several advantages:
 3. **Strong typing**: The schema provides a clear contract between client and server
 4. **Introspection**: The API is self-documenting
 5. **Efficient data loading**: Reduces over-fetching and under-fetching of data
-
-While this example focuses on read operations, GraphQL also supports mutations (write operations) and subscriptions (real-time updates).
+6. **Real-time capabilities**: Subscriptions enable real-time data updates
+7. **Complete CRUD operations**: Full support for create, read, update, and delete operations through queries and mutations

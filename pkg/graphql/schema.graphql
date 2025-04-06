@@ -1,5 +1,7 @@
 schema {
   query: Query
+  mutation: Mutation
+  subscription: Subscription
 }
 
 type Query {
@@ -18,6 +20,16 @@ type Query {
   # Delivery queries
   delivery(id: ID!): Delivery
   deliveries(filter: DeliveryFilter): [Delivery!]!
+}
+
+type Mutation {
+  createListing(input: CreateListingInput!): Listing!
+  createPurchase(input: CreatePurchaseInput!): Purchase!
+  createDelivery(input: CreateDeliveryInput!): Delivery!
+}
+
+type Subscription {
+  deliveryUpdated(purchaseId: ID): Delivery!
 }
 
 type Seller {
@@ -80,4 +92,23 @@ input DeliveryFilter {
   status: DeliveryStatus
   fromDate: String
   toDate: String
+}
+
+input CreateListingInput {
+  sellerId: ID!
+  title: String!
+  description: String!
+  price: Float!
+}
+
+input CreatePurchaseInput {
+  listingId: ID!
+  price: Float!
+  bankTxId: String!
+  deliveryAddress: String!
+}
+
+input CreateDeliveryInput {
+  purchaseId: ID!
+  status: DeliveryStatus!
 }
